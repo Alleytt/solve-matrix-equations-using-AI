@@ -19,19 +19,23 @@ print(f"结果: {c}")
 print("\n测试 5: 定义简单模型")
 import torch.nn as nn
 class SimpleModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(1, 1)
     def forward(self, x):
-        return x * 2
+        return self.linear(x.unsqueeze(1)).squeeze()
 
 model = SimpleModel()
 print("模型创建成功")
 
 print("\n测试 6: 前向传播")
-x = torch.tensor([1, 2, 3])
+x = torch.tensor([1, 2, 3], dtype=torch.float32)
 y = model(x)
 print(f"输出: {y}")
 
 print("\n测试 7: 损失计算")
-target = torch.tensor([2, 4, 6])
+target = torch.tensor([2, 4, 6], dtype=torch.float32)
+y = y.float()
 l = nn.MSELoss()(y, target)
 print(f"损失: {l}")
 
