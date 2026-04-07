@@ -89,4 +89,18 @@ class MatrixAnalyzer:
         elif solver == "pinv":
             return torch.linalg.pinv(A) @ B
         else:
-            return torch.linalg.solve(A, B)
+            return torch.linalg.solve(A, B)    
+    
+    @staticmethod
+    def analyze(A):
+        """分析矩阵的性质"""
+        info = {
+            "shape": A.shape,
+            "is_square": A.shape[0] == A.shape[1],
+            "is_singular": MatrixErrorHandler.is_singular(A),
+            "is_positive_definite": MatrixAnalyzer.is_positive_definite(A),
+            "condition_number": MatrixAnalyzer.condition_number(A),
+            "is_ill_conditioned": MatrixAnalyzer.is_ill_conditioned(A),
+            "rank": MatrixErrorHandler.get_rank(A)
+        }
+        return info
