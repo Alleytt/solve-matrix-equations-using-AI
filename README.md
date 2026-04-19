@@ -223,6 +223,156 @@ streamlit run app_advanced.py
 - **条件数**：矩阵的条件数
 - **方法**：使用的求解方法
 
+## 核心技术原理
+
+### 1. **问题范式转换**
+
+**实现位置**：[src/solver/trainer.py](file:///d:/solve-matrix-equations-using-AI-main%20(1)/solve-matrix-equations-using-AI-main/src/solver/trainer.py#L11-L102)
+
+**原理**：将矩阵求解问题转换为**参数化连续映射问题**
+- 传统方法：直接求解 AX=B
+- AI方法：学习参数 p → 矩阵 X(p) 的连续映射关系
+- 通过参数化矩阵族，将离散求解问题转换为连续函数逼近问题
+
+```python
+# 训练时采样参数 p，学习 p 到矩阵解的映射
+p_train = np.random.uniform(0, 1, num_train)
+for p in p_train:
+    H = generate_parametric_matrix(p, n).to(device)
+    # 学习 p -> X 的映射关系
+```
+
+### 2. **低秩连续映射模型**
+
+**实现位置**：[src/models/low_rank_continuous_mapping.py](file:///d:/solve-matrix-equations-using-AI-main%20(1)/solve-matrix-equations-using-AI-main/src/models/low_rank_continuous_mapping.py#L1-L42)
+
+**原理**：使用低秩张量分解实现连续映射
+- MLP 网络：p → Φ(p) （参数到潜在空间的映射）
+- 可学习张量 C：n1 × n2 × latent_dim
+- 通过 mode-3 张量-矩阵乘法：X = C ×₃ Φ(p)
+
+```python
+class LowRankContinuousMapping(nn.Module):
+    def __init__(self, input_dim=1, hidden_dim=100, latent_dim=20, output_shape=None, activation='sin'):
+        # MLP: p -> Φ(p)
+        layers = []
+        layers.append(nn.Linear(input_dim, hidden_dim))
+        layers.append(self.Sin())  # sin激活函数
+        # ...
+        
+        # 可学习 latent tensor C: n1 × n2 × latent_dim
+        self.C = nn.Parameter(torch.randn(output_shape[0], output_shape[1], latent_dim))
+```
+
+### 3. **损失函数**
+
+**实现位置**：[src/solver/algebraic_solver.py](file:///d:/solve-matrix-equations-using-AI-main%20(1)/solve-matrix-equations-using-AI-main/src/solver/algebraic_solver.py) 中的 `AlgebraicLoss` 类
+
+**原理**：代数一致性损失函数
+- 数据损失：MSE(pred, target)
+- 一致性损失：||A·X - I||_F² （确保 AX=I）
+- 组合损失：L = L_data + λ·L_consistency
+
+```python
+# 在 train_model.py 中使用
+criterion = AlgebraicLoss(op_type=op, lambda_consist=1.0, equation_type=equation_type)
+optimizer = optim.Adam(model.parameters(), lr=1e-4)
+
+# 训练循环中
+for p_tensor, H_p, B_p, C_p, gt in train_data:
+    pred = model(p_tensor)
+    loss = criterion(pred, gt, H_p, B_p, C_p)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+```
+
+### 4. **闭环验证机制**
+
+**实现位置**：[src/utils/adaptive_sampling.py](file:///d:/solve-matrix-equations-using-AI-main%20(1)/solve-matrix-equations-using-AI-main/src/utils/adaptive_sampling.py#L1-L30)
+
+**原理**：自适应采样 + 残差验证的闭环
+- 在候选点集上计算模型预测的残差
+- 根据残差大小自适应添加新的训练点
+- 形成"训练→验证→采样→再训练"的闭环
+
+```python
+def adaptive_sampling(model, A_func, candidate_p, epsilon_r=1e-3, epsilon_p=0.05, N_add=10):
+    model.eval()
+    with torch.no_grad():
+        residuals = []
+        for p in candidate_p:
+            p_tensor = torch.tensor([[p]], dtype=torch.float32)
+            pred = model(p_tensor)
+            A_p = A_func(p).unsqueeze(0)
+            # 计算残差 ||A·X - I||_F²
+            I = torch.eye(A_p.shape[1]).unsqueeze(0)
+            res = torch.norm(torch.bmm(A_p, pred) - I, p='fro').item()**2
+            residuals.append((p, res))
+        
+        # 选择残差最大的点作为新训练点
+        residuals.sort(key=lambda x: x[1], reverse=True)
+        new_col = [p for p, res in residuals[:N_add] if res > epsilon_r]
+```
+
+### 5. **矩阵条件数**
+
+**实现位置**：
+- [test_with_trained_model.py](file:///d:/solve-matrix-equations-using-AI-main%20(1)/solve-matrix-equations-using-AI-main/test_with_trained_model.py#L98-L99) - 测试时计算
+- [src/utils/advanced_data_generator.py](file:///d:/solve-matrix-equations-using-AI-main%20(1)/solve-matrix-equations-using-AI-main/src/utils/advanced_data_generator.py#L88-L93) - 生成时控制
+
+**原理**：条件数 κ(A) = ||A||·||A⁻¹|| 衡量矩阵病态程度
+- 条件数越大，矩阵越病态，求解越困难
+- 用于评估不同分布矩阵的难度
+- 指导求解方法的选择
+
+```python
+# 测试时计算条件数
+cond = np.linalg.cond(A)
+
+# 生成正定矩阵时控制条件数
+eigenvalues = np.random.uniform(1, self.config.max_condition_number, size)
+```
+
+### 6. **AI 模型自适应鲁棒求解策略**
+
+**实现位置**：
+- [src/solver/hybrid_solver.py](file:///d:/solve-matrix-equations-using-AI-main%20(1)/solve-matrix-equations-using-AI-main/src/solver/hybrid_solver.py) - 混合求解器
+- [src/solver/numerical_stability.py](file:///d:/solve-matrix-equations-using-AI-main%20(1)/solve-matrix-equations-using-AI-main/src/solver/numerical_stability.py) - 数值稳定性检查
+
+**原理**：AI + 数值方法的自适应组合
+- 根据矩阵条件数自动选择求解策略
+- 低条件数：传统数值方法（快速精确）
+- 高条件数：AI提供初始值 + 数值方法迭代修正
+- 病态矩阵：SVD/伪逆方法
+
+```python
+# 混合求解器工作流程
+class HybridSolver:
+    def solve(self, A, B):
+        # 1. AI模型提供初始解
+        ai_pred = self.ai_model(p_tensor)
+        
+        # 2. 数值方法迭代修正
+        X_refined = numerical_refinement(A, B, ai_pred)
+        
+        # 3. 返回最终结果
+        return {'solution': X_refined, 'residual': residual}
+```
+
+## 总结
+
+这些核心原理构成了一个完整的**AI增强型矩阵求解框架**：
+
+1. **问题范式转换**：离散求解 → 连续映射
+2. **低秩连续映射**：高效参数化表示
+3. **代数损失函数**：保证解的数学一致性
+4. **闭环验证**：自适应提升模型精度
+5. **条件数分析**：量化问题难度
+6. **自适应鲁棒策略**：AI与数值方法的最优组合
+
+整个系统通过**训练阶段**学习连续映射，**推理阶段**根据矩阵特性自适应选择最优求解策略，实现了速度与精度的最佳平衡。
+
 ## 核心模块详解
 
 ### 1. 配置管理 (`src/config`)
